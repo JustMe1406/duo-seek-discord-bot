@@ -1,5 +1,5 @@
 import { Message, VoiceState } from "discord.js";
-import { client } from "../bot.js";
+import { areMessageCommandsEnabled, client } from "../bot.js";
 import { logger } from "../utils/logger.js";
 import {
   extendSession,
@@ -82,11 +82,13 @@ export const registerDiscordSessionListeners = (): void => {
     });
   });
 
-  client.on("messageCreate", (message) => {
-    handleMessageCreate(message).catch((error: unknown) => {
-      logger.error("Failed to process Discord message command", {
-        error: error instanceof Error ? error.message : String(error)
+  if (areMessageCommandsEnabled()) {
+    client.on("messageCreate", (message) => {
+      handleMessageCreate(message).catch((error: unknown) => {
+        logger.error("Failed to process Discord message command", {
+          error: error instanceof Error ? error.message : String(error)
+        });
       });
     });
-  });
+  }
 };

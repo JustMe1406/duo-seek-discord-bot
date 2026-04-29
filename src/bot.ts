@@ -17,13 +17,20 @@ const requiredGuildPermissions = new PermissionsBitField([
   PermissionsBitField.Flags.Speak
 ]);
 
+export const areMessageCommandsEnabled = (): boolean => process.env.ENABLE_MESSAGE_COMMANDS === "true";
+
+const intents = [
+  GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildVoiceStates,
+  GatewayIntentBits.GuildMessages
+];
+
+if (areMessageCommandsEnabled()) {
+  intents.push(GatewayIntentBits.MessageContent);
+}
+
 export const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+  intents
 });
 
 export const getRequiredEnv = (key: string): string => {
@@ -46,6 +53,10 @@ export const startBot = async (): Promise<void> => {
     });
 
     logger.warn("Session state is in memory. Active sessions will not survive a bot restart.");
+
+    if (!areMessageCommandsEnabled()) {
+      logger.warn("Discord text commands are disabled. Set ENABLE_MESSAGE_COMMANDS=true after enabling Message Content Intent in the Discord Developer Portal.");
+    }
   });
 
   await client.login(token);

@@ -48,22 +48,30 @@ DISCORD_TOKEN=
 DISCORD_GUILD_ID=
 DISCORD_CATEGORY_ID=
 PORT=3000
+ENABLE_MESSAGE_COMMANDS=false
 ```
 
 ## Discord Setup
 
 1. Create an application in the Discord Developer Portal.
 2. Add a bot user and copy its token into `DISCORD_TOKEN`.
-3. Enable the privileged `Message Content Intent`, required for `!extend 30` and `!extend 60`.
-4. Invite the bot to your server with these permissions:
+3. Invite the bot to your server with these permissions:
    - Manage Channels
    - View Channels
    - Send Messages
    - Read Message History
    - Connect
    - Speak
-5. Copy the guild ID into `DISCORD_GUILD_ID`.
-6. Create a category for Duo Seek sessions and copy its ID into `DISCORD_CATEGORY_ID`.
+4. Copy the guild ID into `DISCORD_GUILD_ID`.
+5. Create a category for Duo Seek sessions and copy its ID into `DISCORD_CATEGORY_ID`.
+
+Discord text commands are optional. To enable `!extend 30` and `!extend 60`, enable the privileged `Message Content Intent` in the Discord Developer Portal, then set:
+
+```env
+ENABLE_MESSAGE_COMMANDS=true
+```
+
+Leave `ENABLE_MESSAGE_COMMANDS=false` if you only want website/API-based session extension. This avoids Discord's `Used disallowed intents` startup error.
 
 ## Session Lifecycle
 
@@ -200,6 +208,8 @@ Inside the session text channel, either matched player can run:
 
 The bot rejects commands from users who are not part of that Duo session.
 The bot also rejects extension commands after the session reaches its 2-extension limit.
+
+These commands require `ENABLE_MESSAGE_COMMANDS=true` and the Discord Developer Portal `Message Content Intent` toggle. The website `/extend-session` endpoint works without this privileged intent.
 
 ## Backend Integration Example
 
