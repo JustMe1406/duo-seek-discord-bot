@@ -12,7 +12,7 @@ Production-ready Discord bot for Duo Seek matchmaking sessions. The Next.js + Su
 - Waiting timer: users have 60 seconds to join voice
 - Voice join detection through `voiceStateUpdate`
 - Active session timer: 5 minutes after both users join
-- Session extensions from the website or Discord text channel
+- Session extensions from the website or Discord text channel with both-player confirmation
 - Max 2 extensions per session
 - Immediate manual cleanup through `POST /end-session`
 - Active session ends if a player leaves voice for more than 30 seconds
@@ -82,7 +82,7 @@ Leave `ENABLE_MESSAGE_COMMANDS=false` if you only want website/API-based session
 3. Session starts in `waiting` state and expires after 60 seconds if both users do not join voice.
 4. When both matched users are present in the voice channel, the session becomes `active`.
 5. Active sessions expire after 5 minutes unless extended.
-6. Active sessions can be extended up to 2 times.
+6. Active sessions can be extended up to 2 times, but both players must approve the same duration.
 7. If a player leaves voice during an active session and does not return within 30 seconds, the session ends.
 8. Expiry or manual ending deletes both Discord channels and removes the session from memory.
 
@@ -145,18 +145,20 @@ Request:
 ```json
 {
   "match_id": "ab12cd34-0000-4000-9000-000000000000",
-  "duration": 30
+  "duration": 30,
+  "user_id": "111111111111111111"
 }
 ```
 
-`duration` must be `30` or `60` minutes, and the session must already be `active`.
-Each session can be extended at most 2 times.
+`duration` must be `30` or `60` minutes, `user_id` must be one of the two session users, and the session must already be `active`.
+Each session can be extended at most 2 times. The first approval returns `status: "pending"`; when the second player approves the same duration, the timer is extended and the response returns `status: "extended"`.
 
 Success response:
 
 ```json
 {
   "success": true,
+  "status": "extended",
   "session": {
     "match_id": "ab12cd34-0000-4000-9000-000000000000",
     "state": "active",
@@ -208,6 +210,7 @@ Inside the session text channel, either matched player can run:
 
 The bot rejects commands from users who are not part of that Duo session.
 The bot also rejects extension commands after the session reaches its 2-extension limit.
+Both players must run the same extension command before the timer is extended.
 
 These commands require `ENABLE_MESSAGE_COMMANDS=true` and the Discord Developer Portal `Message Content Intent` toggle. The website `/extend-session` endpoint works without this privileged intent.
 
@@ -243,6 +246,34 @@ export async function createDiscordSession(match: {
 
   if (!response.ok || !data.success) {
     throw new Error(data.error?.message ?? "Failed to create Discord session");
+  }
+
+  return data;
+}
+```
+
+Extension approval from the website should pass the Discord user ID of the player clicking approve:
+
+```ts
+export async function approveDiscordSessionExtension(input: {
+  matchId: string;
+  userDiscordId: string;
+  duration: 30 | 60;
+}) {
+  const response = await fetch(`${process.env.DISCORD_BOT_URL}/extend-session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      match_id: input.matchId,
+      user_id: input.userDiscordId,
+      duration: input.duration
+    })
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.error?.message ?? "Failed to approve Discord session extension");
   }
 
   return data;

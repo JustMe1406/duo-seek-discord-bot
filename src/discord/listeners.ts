@@ -2,12 +2,12 @@ import { Message, VoiceState } from "discord.js";
 import { areMessageCommandsEnabled, client } from "../bot.js";
 import { logger } from "../utils/logger.js";
 import {
-  extendSession,
   getSessionByTextChannelId,
   getSessionByVoiceChannelId,
   isSessionUser,
   markUserJoined,
   markUserLeft,
+  requestSessionExtension,
   SessionError
 } from "./sessions.js";
 
@@ -17,7 +17,7 @@ const handleVoiceStateUpdate = async (oldState: VoiceState, newState: VoiceState
   if (oldState.channelId && oldState.channelId !== newState.channelId) {
     const previousSession = getSessionByVoiceChannelId(oldState.channelId);
     if (previousSession) {
-      markUserLeft(previousSession, oldState.id);
+      await markUserLeft(previousSession, oldState.id);
     }
   }
 
@@ -64,8 +64,12 @@ const handleMessageCreate = async (message: Message): Promise<void> => {
   }
 
   try {
-    const updatedSession = await extendSession(session.match_id, Number(match[1]));
-    await message.reply(`Session extended. New expiry: ${updatedSession.expires_at}`);
+    const result = await requestSessionExtension(session.match_id, Number(match[1]), message.author.id);
+    await message.reply(
+      result.status === "extended"
+        ? `Extension approved by both players. New expiry: ${result.session.expires_at}`
+        : "Extension request recorded. Waiting for the other player to confirm."
+    );
   } catch (error) {
     const messageText =
       error instanceof SessionError ? error.message : "Could not extend this session right now.";

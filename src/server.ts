@@ -1,7 +1,7 @@
 import express, { NextFunction, Request, Response } from "express";
 import { createDiscordSession, validateMatchId } from "./discord/createSession.js";
 import { isValidDiscordUserId } from "./discord/permissions.js";
-import { endSession, extendSession, SessionError } from "./discord/sessions.js";
+import { endSession, requestSessionExtension, SessionError } from "./discord/sessions.js";
 import { logger } from "./utils/logger.js";
 
 type CreateSessionBody = {
@@ -13,6 +13,7 @@ type CreateSessionBody = {
 type ExtendSessionBody = {
   match_id?: unknown;
   duration?: unknown;
+  user_id?: unknown;
 };
 
 type EndSessionBody = {
@@ -59,7 +60,7 @@ const enforceCreateSessionRateLimit = (): void => {
   }
 };
 
-const validateExtendSessionBody = (body: ExtendSessionBody): { matchId: string; duration: number } => {
+const validateExtendSessionBody = (body: ExtendSessionBody): { matchId: string; duration: number; userId: string } => {
   if (typeof body.match_id !== "string" || body.match_id.trim().length === 0) {
     throw new SessionError("VALIDATION_ERROR", "match_id is required", 400);
   }
@@ -71,9 +72,14 @@ const validateExtendSessionBody = (body: ExtendSessionBody): { matchId: string; 
     throw new SessionError("VALIDATION_ERROR", "duration must be 30 or 60 minutes", 400);
   }
 
+  if (!isValidDiscordUserId(body.user_id)) {
+    throw new SessionError("VALIDATION_ERROR", "user_id must be a valid Discord snowflake", 400);
+  }
+
   return {
     matchId,
-    duration: body.duration
+    duration: body.duration,
+    userId: body.user_id
   };
 };
 
@@ -127,11 +133,12 @@ export const createServer = (): express.Express => {
   app.post("/extend-session", async (req: Request<object, object, ExtendSessionBody>, res, next) => {
     try {
       const payload = validateExtendSessionBody(req.body);
-      const session = await extendSession(payload.matchId, payload.duration);
+      const result = await requestSessionExtension(payload.matchId, payload.duration, payload.userId);
 
       res.status(200).json({
         success: true,
-        session
+        status: result.status,
+        session: result.session
       });
     } catch (error) {
       next(error);
