@@ -1,33 +1,15 @@
-import {
-  ChannelType,
-  GuildBasedChannel,
-  GuildTextBasedChannel,
-  TextChannel,
-  VoiceChannel
-} from "discord.js";
-import { client, getConfiguredCategory, getConfiguredGuild, ensureBotGuildPermissions } from "../bot.js";
+import { ChannelType, GuildBasedChannel, GuildTextBasedChannel, TextChannel, User, VoiceChannel } from "discord.js";
+import { client, ensureBotGuildPermissions, getConfiguredCategory, getConfiguredGuild } from "../bot.js";
 import { logger } from "../utils/logger.js";
+import { buildTextPermissionOverwrites, buildVoicePermissionOverwrites } from "./permissions.js";
 import {
-  buildTextPermissionOverwrites,
-  buildVoicePermissionOverwrites,
-  resolveUser
-} from "./permissions.js";
-
-const SESSION_DURATION_MINUTES = 10;
-const SESSION_DURATION_MS = SESSION_DURATION_MINUTES * 60 * 1000;
-
-const activeSessions = new Map<string, NodeJS.Timeout>();
-
-export class SessionError extends Error {
-  constructor(
-    public readonly code: string,
-    message: string,
-    public readonly statusCode = 500
-  ) {
-    super(message);
-    this.name = "SessionError";
-  }
-}
+  getSessionByMatchId,
+  registerWaitingSession,
+  SessionApiView,
+  SessionError,
+  toSessionApiView,
+  WAITING_DURATION_MS
+} from "./sessions.js";
 
 export type CreateSessionInput = {
   user1Id: string;
@@ -35,17 +17,40 @@ export type CreateSessionInput = {
   matchId: string;
 };
 
-export type CreateSessionResult = {
-  voice: string;
-  text: string;
-};
+export type CreateSessionResult = SessionApiView;
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-const validateMatchId = (matchId: string): void => {
+export const validateMatchId = (matchId: string): void => {
   if (!uuidPattern.test(matchId)) {
     throw new SessionError("VALIDATION_ERROR", "match_id must be a valid UUID", 400);
   }
+};
+
+const cleanUsername = (username: string): string => {
+  const cleaned = username
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 18);
+
+  return cleaned || "player";
+};
+
+const buildShortMatchId = (matchId: string): string => matchId.replace(/-/g, "").slice(0, 6);
+
+const buildSessionChannelNames = (user1: User, user2: User, matchId: string): { voice: string; text: string } => {
+  const base = `${cleanUsername(user1.username)}-${cleanUsername(user2.username)}-${buildShortMatchId(matchId)}`;
+  const maxBaseLength = 76;
+  const safeBase = base.length > maxBaseLength ? base.slice(0, maxBaseLength) : base;
+
+  return {
+    voice: `🎙️ duo-${safeBase}`,
+    text: `💬 duo-${safeBase}`
+  };
+};
+
+const buildChannelUrl = (guildId: string, channelId: string): string => {
+  return `https://discord.com/channels/${guildId}/${channelId}`;
 };
 
 const deleteChannelIfExists = async (channel: GuildBasedChannel | null): Promise<void> => {
@@ -53,28 +58,12 @@ const deleteChannelIfExists = async (channel: GuildBasedChannel | null): Promise
     return;
   }
 
-  await channel.delete("Duo Seek session cleanup").catch((error: unknown) => {
-    logger.warn("Session channel cleanup skipped", {
+  await channel.delete("Duo Seek session creation rollback").catch((error: unknown) => {
+    logger.warn("Session channel rollback skipped", {
       channel_id: channel.id,
       error: error instanceof Error ? error.message : String(error)
     });
   });
-};
-
-const scheduleCleanup = (matchId: string, voiceChannel: VoiceChannel, textChannel: TextChannel): void => {
-  const timeout = setTimeout(async () => {
-    logger.info("Cleaning up expired Duo session", {
-      match_id: matchId,
-      voice_channel_id: voiceChannel.id,
-      text_channel_id: textChannel.id
-    });
-
-    await Promise.all([deleteChannelIfExists(voiceChannel), deleteChannelIfExists(textChannel)]);
-    activeSessions.delete(matchId);
-  }, SESSION_DURATION_MS);
-
-  timeout.unref();
-  activeSessions.set(matchId, timeout);
 };
 
 export const createDiscordSession = async ({
@@ -88,7 +77,7 @@ export const createDiscordSession = async ({
     throw new SessionError("VALIDATION_ERROR", "user1_id and user2_id must be different users", 400);
   }
 
-  if (activeSessions.has(matchId)) {
+  if (getSessionByMatchId(matchId)) {
     throw new SessionError("DUPLICATE_SESSION", "A session already exists for this match_id", 409);
   }
 
@@ -102,19 +91,26 @@ export const createDiscordSession = async ({
     throw new SessionError("BOT_NOT_READY", "Discord bot is not ready", 503);
   }
 
+  let user1: User;
+  let user2: User;
+
   try {
-    await Promise.all([resolveUser(client, user1Id), resolveUser(client, user2Id)]);
+    const [member1, member2] = await Promise.all([guild.members.fetch(user1Id), guild.members.fetch(user2Id)]);
+    user1 = member1.user;
+    user2 = member2.user;
   } catch {
-    throw new SessionError("INVALID_USER", "One or both Discord user IDs could not be resolved", 400);
+    throw new SessionError("INVALID_USER", "One or both Discord users are not members of the configured guild", 400);
   }
 
   let voiceChannel: VoiceChannel | null = null;
   let textChannel: TextChannel | null = null;
 
   try {
-    // Create voice first, then text, so partial failures can be cleaned up deterministically.
+    const channelNames = buildSessionChannelNames(user1, user2, matchId);
+
+    // Voice is created first so any partial failure can be rolled back before responding.
     voiceChannel = await guild.channels.create({
-      name: `duo-${matchId}`,
+      name: channelNames.voice,
       type: ChannelType.GuildVoice,
       parent: category.id,
       permissionOverwrites: buildVoicePermissionOverwrites({
@@ -126,7 +122,7 @@ export const createDiscordSession = async ({
     });
 
     textChannel = await guild.channels.create({
-      name: `duo-${matchId}`,
+      name: channelNames.text,
       type: ChannelType.GuildText,
       parent: category.id,
       permissionOverwrites: buildTextPermissionOverwrites({
@@ -138,23 +134,22 @@ export const createDiscordSession = async ({
     });
 
     await (textChannel as GuildTextBasedChannel).send(
-      `🎮 Duo session started!\nYou have ${SESSION_DURATION_MINUTES} minutes to play.\n\nUse this channel to communicate.`
+      `🎮 Duo session started!\nYou have ${WAITING_DURATION_MS / 1000} seconds to join voice.\n\nUse this channel to communicate.`
     );
 
-    scheduleCleanup(matchId, voiceChannel, textChannel);
-
-    logger.info("Duo session created", {
+    const session = registerWaitingSession({
       match_id: matchId,
       user1_id: user1Id,
       user2_id: user2Id,
       voice_channel_id: voiceChannel.id,
-      text_channel_id: textChannel.id
+      text_channel_id: textChannel.id,
+      voice_channel_name: voiceChannel.name,
+      text_channel_name: textChannel.name,
+      voice_join_url: buildChannelUrl(guild.id, voiceChannel.id),
+      text_channel_url: buildChannelUrl(guild.id, textChannel.id)
     });
 
-    return {
-      voice: voiceChannel.id,
-      text: textChannel.id
-    };
+    return toSessionApiView(session);
   } catch (error) {
     await Promise.all([deleteChannelIfExists(voiceChannel), deleteChannelIfExists(textChannel)]);
 

@@ -1,9 +1,11 @@
 import "dotenv/config";
 import { startBot } from "./bot.js";
+import { registerDiscordSessionListeners } from "./discord/listeners.js";
 import { startServer } from "./server.js";
 import { logger } from "./utils/logger.js";
 
 const main = async (): Promise<void> => {
+  registerDiscordSessionListeners();
   await startBot();
   startServer();
 };

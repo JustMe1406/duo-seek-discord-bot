@@ -1,12 +1,18 @@
 import express, { NextFunction, Request, Response } from "express";
-import { createDiscordSession, SessionError } from "./discord/createSession.js";
+import { createDiscordSession, validateMatchId } from "./discord/createSession.js";
 import { isValidDiscordUserId } from "./discord/permissions.js";
+import { extendSession, SessionError } from "./discord/sessions.js";
 import { logger } from "./utils/logger.js";
 
 type CreateSessionBody = {
   user1_id?: unknown;
   user2_id?: unknown;
   match_id?: unknown;
+};
+
+type ExtendSessionBody = {
+  match_id?: unknown;
+  duration?: unknown;
 };
 
 const validateCreateSessionBody = (body: CreateSessionBody): { user1Id: string; user2Id: string; matchId: string } => {
@@ -29,6 +35,24 @@ const validateCreateSessionBody = (body: CreateSessionBody): { user1Id: string; 
   };
 };
 
+const validateExtendSessionBody = (body: ExtendSessionBody): { matchId: string; duration: number } => {
+  if (typeof body.match_id !== "string" || body.match_id.trim().length === 0) {
+    throw new SessionError("VALIDATION_ERROR", "match_id is required", 400);
+  }
+
+  const matchId = body.match_id.trim();
+  validateMatchId(matchId);
+
+  if (body.duration !== 30 && body.duration !== 60) {
+    throw new SessionError("VALIDATION_ERROR", "duration must be 30 or 60 minutes", 400);
+  }
+
+  return {
+    matchId,
+    duration: body.duration
+  };
+};
+
 export const createServer = (): express.Express => {
   const app = express();
 
@@ -45,7 +69,33 @@ export const createServer = (): express.Express => {
 
       res.status(201).json({
         success: true,
-        channel_ids: channelIds
+        voice_channel_id: channelIds.voice_channel_id,
+        text_channel_id: channelIds.text_channel_id,
+        voice_join_url: channelIds.voice_join_url,
+        text_channel_url: channelIds.text_channel_url,
+        voice_channel_name: channelIds.voice_channel_name,
+        text_channel_name: channelIds.text_channel_name,
+        expires_at: channelIds.expires_at,
+        state: channelIds.state,
+        channel_ids: {
+          voice: channelIds.voice_channel_id,
+          text: channelIds.text_channel_id
+        },
+        session: channelIds
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/extend-session", async (req: Request<object, object, ExtendSessionBody>, res, next) => {
+    try {
+      const payload = validateExtendSessionBody(req.body);
+      const session = await extendSession(payload.matchId, payload.duration);
+
+      res.status(200).json({
+        success: true,
+        session
       });
     } catch (error) {
       next(error);

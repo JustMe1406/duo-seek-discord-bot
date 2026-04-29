@@ -18,7 +18,12 @@ const requiredGuildPermissions = new PermissionsBitField([
 ]);
 
 export const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
 export const getRequiredEnv = (key: string): string => {
@@ -39,6 +44,8 @@ export const startBot = async (): Promise<void> => {
       bot_id: client.user?.id,
       bot_tag: client.user?.tag
     });
+
+    logger.warn("Session state is in memory. Active sessions will not survive a bot restart.");
   });
 
   await client.login(token);

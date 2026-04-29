@@ -1,4 +1,4 @@
-import { Client, OverwriteResolvable, PermissionsBitField } from "discord.js";
+import { Client, OverwriteResolvable, PermissionsBitField, User } from "discord.js";
 
 type SessionPermissionsInput = {
   guildId: string;
@@ -87,6 +87,6 @@ export const isValidDiscordUserId = (value: unknown): value is string => {
   return typeof value === "string" && userSnowflakePattern.test(value);
 };
 
-export const resolveUser = async (client: Client, userId: string): Promise<void> => {
-  await client.users.fetch(userId);
+export const resolveUser = async (client: Client, userId: string): Promise<User> => {
+  return client.users.fetch(userId);
 };
