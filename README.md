@@ -1,15 +1,25 @@
 # Duo Seek Discord Bot
 
-Production-ready Discord bot for Duo Seek matchmaking sessions. The Next.js + Supabase backend calls this service after two users are matched, and the bot creates a private Discord text and voice session for them.
+Production-ready Discord bot for Duo Seek matchmaking sessions. The Next.js + Supabase backend calls this service after two users accept a match, and the bot creates a private Discord text and voice session for them.
 
 ## Features
 
 - Discord.js v14 bot client
-- Express API endpoint for session creation
+- Express API for session creation and extension
 - Private text and voice channels inside a configured category
-- Permission overwrites for only the two matched users and the bot
+- Clean channel names with player usernames and short match IDs
+- Website-ready Discord join links
+- Waiting timer: users have 60 seconds to join voice
+- Voice join detection through `voiceStateUpdate`
+- Active session timer: 5 minutes after both users join
+- Session extensions from the website or Discord text channel with both-player confirmation
+- Max 2 extensions per session
+- Immediate manual cleanup through `POST /end-session`
+- Active session ends if a player leaves voice for more than 30 seconds
+- Startup cleanup deletes stale Duo channels left by bot restarts
+- Basic `/create-session` rate limit to protect Discord channel creation
+- Automatic cleanup with safe channel deletion
 - Duplicate `match_id` protection while a session is active
-- Automatic cleanup after 10 minutes
 - Typed request validation and structured error responses
 - Railway-ready build/start scripts
 
@@ -22,7 +32,9 @@ src/
   server.ts
   discord/
     createSession.ts
+    listeners.ts
     permissions.ts
+    sessions.ts
   utils/
     logger.ts
 ```
@@ -36,6 +48,7 @@ DISCORD_TOKEN=
 DISCORD_GUILD_ID=
 DISCORD_CATEGORY_ID=
 PORT=3000
+ENABLE_MESSAGE_COMMANDS=false
 ```
 
 ## Discord Setup
@@ -51,6 +64,29 @@ PORT=3000
    - Speak
 4. Copy the guild ID into `DISCORD_GUILD_ID`.
 5. Create a category for Duo Seek sessions and copy its ID into `DISCORD_CATEGORY_ID`.
+
+Discord text commands are optional. To enable `!extend 30` and `!extend 60`, enable the privileged `Message Content Intent` in the Discord Developer Portal, then set:
+
+```env
+ENABLE_MESSAGE_COMMANDS=true
+```
+
+Leave `ENABLE_MESSAGE_COMMANDS=false` if you only want website/API-based session extension. This avoids Discord's `Used disallowed intents` startup error.
+
+## Session Lifecycle
+
+1. Backend calls `POST /create-session`.
+2. Bot creates:
+   - Voice: `🎙️ duo-{user1}-{user2}-{shortId}`
+   - Text: `💬 duo-{user1}-{user2}-{shortId}`
+3. Session starts in `waiting` state and expires after 60 seconds if both users do not join voice.
+4. When both matched users are present in the voice channel, the session becomes `active`.
+5. Active sessions expire after 5 minutes unless extended.
+6. Active sessions can be extended up to 2 times, but both players must approve the same duration.
+7. If a player leaves voice during an active session and does not return within 30 seconds, the session ends.
+8. Expiry or manual ending deletes both Discord channels and removes the session from memory.
+
+Session state is currently in memory. If the bot restarts, active sessions are not restored; on boot the bot scans the configured category and deletes stale Duo text/voice channels to avoid abandoned private rooms.
 
 ## API
 
@@ -71,12 +107,85 @@ Success response:
 ```json
 {
   "success": true,
+  "voice_channel_id": "123",
+  "text_channel_id": "456",
+  "voice_join_url": "https://discord.com/channels/guild/123",
+  "text_channel_url": "https://discord.com/channels/guild/456",
+  "voice_channel_name": "🎙️ duo-playerone-playertwo-ab12cd",
+  "text_channel_name": "💬 duo-playerone-playertwo-ab12cd",
+  "expires_at": "2026-04-30T12:01:00.000Z",
+  "state": "waiting",
   "channel_ids": {
-    "voice": "...",
-    "text": "..."
+    "voice": "123",
+    "text": "456"
+  },
+  "session": {
+    "match_id": "ab12cd34-0000-4000-9000-000000000000",
+    "user1_id": "111111111111111111",
+    "user2_id": "222222222222222222",
+    "voice_channel_id": "123",
+    "text_channel_id": "456",
+    "voice_channel_name": "🎙️ duo-playerone-playertwo-ab12cd",
+    "text_channel_name": "💬 duo-playerone-playertwo-ab12cd",
+    "voice_join_url": "https://discord.com/channels/guild/123",
+    "text_channel_url": "https://discord.com/channels/guild/456",
+    "state": "waiting",
+    "expires_at": "2026-04-30T12:01:00.000Z",
+    "joined_users": [],
+    "extension_count": 0,
+    "max_extensions": 2
   }
 }
 ```
+
+### `POST /extend-session`
+
+Request:
+
+```json
+{
+  "match_id": "ab12cd34-0000-4000-9000-000000000000",
+  "duration": 30,
+  "user_id": "111111111111111111"
+}
+```
+
+`duration` must be `30` or `60` minutes, `user_id` must be one of the two session users, and the session must already be `active`.
+Each session can be extended at most 2 times. The first approval returns `status: "pending"`; when the second player approves the same duration, the timer is extended and the response returns `status: "extended"`.
+
+Success response:
+
+```json
+{
+  "success": true,
+  "status": "extended",
+  "session": {
+    "match_id": "ab12cd34-0000-4000-9000-000000000000",
+    "state": "active",
+    "expires_at": "2026-04-30T12:35:00.000Z"
+  }
+}
+```
+
+### `POST /end-session`
+
+Request:
+
+```json
+{
+  "match_id": "ab12cd34-0000-4000-9000-000000000000"
+}
+```
+
+Success response:
+
+```json
+{
+  "success": true
+}
+```
+
+Use this when the website has a leave/end-session action or when the backend needs to clean up a match immediately.
 
 Error response:
 
@@ -85,8 +194,89 @@ Error response:
   "success": false,
   "error": {
     "code": "VALIDATION_ERROR",
-    "message": "user1_id must be a valid Discord snowflake"
+    "message": "duration must be 30 or 60 minutes"
   }
+}
+```
+
+## Discord Commands
+
+Inside the session text channel, either matched player can run:
+
+```text
+!extend 30
+!extend 60
+```
+
+The bot rejects commands from users who are not part of that Duo session.
+The bot also rejects extension commands after the session reaches its 2-extension limit.
+Both players must run the same extension command before the timer is extended.
+
+These commands require `ENABLE_MESSAGE_COMMANDS=true` and the Discord Developer Portal `Message Content Intent` toggle. The website `/extend-session` endpoint works without this privileged intent.
+
+## Backend Integration Example
+
+```ts
+type DuoSessionResponse = {
+  success: true;
+  voice_channel_id: string;
+  text_channel_id: string;
+  voice_join_url: string;
+  text_channel_url: string;
+  expires_at: string;
+  state: "waiting" | "active";
+};
+
+export async function createDiscordSession(match: {
+  matchId: string;
+  user1DiscordId: string;
+  user2DiscordId: string;
+}): Promise<DuoSessionResponse> {
+  const response = await fetch(`${process.env.DISCORD_BOT_URL}/create-session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      match_id: match.matchId,
+      user1_id: match.user1DiscordId,
+      user2_id: match.user2DiscordId
+    })
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.error?.message ?? "Failed to create Discord session");
+  }
+
+  return data;
+}
+```
+
+Extension approval from the website should pass the Discord user ID of the player clicking approve:
+
+```ts
+export async function approveDiscordSessionExtension(input: {
+  matchId: string;
+  userDiscordId: string;
+  duration: 30 | 60;
+}) {
+  const response = await fetch(`${process.env.DISCORD_BOT_URL}/extend-session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      match_id: input.matchId,
+      user_id: input.userDiscordId,
+      duration: input.duration
+    })
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.error?.message ?? "Failed to approve Discord session extension");
+  }
+
+  return data;
 }
 ```
 
@@ -117,4 +307,5 @@ npm start
 
 ```http
 POST https://your-railway-service.up.railway.app/create-session
+POST https://your-railway-service.up.railway.app/extend-session
 ```
