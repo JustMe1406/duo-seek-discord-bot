@@ -1,7 +1,7 @@
 import express, { NextFunction, Request, Response } from "express";
 import { createDiscordSession, validateMatchId } from "./discord/createSession.js";
 import { isValidDiscordUserId } from "./discord/permissions.js";
-import { extendSession, SessionError } from "./discord/sessions.js";
+import { endSession, extendSession, SessionError } from "./discord/sessions.js";
 import { logger } from "./utils/logger.js";
 
 type CreateSessionBody = {
@@ -14,6 +14,15 @@ type ExtendSessionBody = {
   match_id?: unknown;
   duration?: unknown;
 };
+
+type EndSessionBody = {
+  match_id?: unknown;
+};
+
+const SESSION_CREATE_WINDOW_MS = 60 * 1000;
+const MAX_SESSION_CREATES_PER_WINDOW = 20;
+let createWindowStartedAt = Date.now();
+let createCountInWindow = 0;
 
 const validateCreateSessionBody = (body: CreateSessionBody): { user1Id: string; user2Id: string; matchId: string } => {
   if (!isValidDiscordUserId(body.user1_id)) {
@@ -35,6 +44,21 @@ const validateCreateSessionBody = (body: CreateSessionBody): { user1Id: string; 
   };
 };
 
+const enforceCreateSessionRateLimit = (): void => {
+  const now = Date.now();
+
+  if (now - createWindowStartedAt >= SESSION_CREATE_WINDOW_MS) {
+    createWindowStartedAt = now;
+    createCountInWindow = 0;
+  }
+
+  createCountInWindow += 1;
+
+  if (createCountInWindow > MAX_SESSION_CREATES_PER_WINDOW) {
+    throw new SessionError("RATE_LIMITED", "Too many session creation requests. Try again shortly.", 429);
+  }
+};
+
 const validateExtendSessionBody = (body: ExtendSessionBody): { matchId: string; duration: number } => {
   if (typeof body.match_id !== "string" || body.match_id.trim().length === 0) {
     throw new SessionError("VALIDATION_ERROR", "match_id is required", 400);
@@ -53,6 +77,17 @@ const validateExtendSessionBody = (body: ExtendSessionBody): { matchId: string; 
   };
 };
 
+const validateEndSessionBody = (body: EndSessionBody): { matchId: string } => {
+  if (typeof body.match_id !== "string" || body.match_id.trim().length === 0) {
+    throw new SessionError("VALIDATION_ERROR", "match_id is required", 400);
+  }
+
+  const matchId = body.match_id.trim();
+  validateMatchId(matchId);
+
+  return { matchId };
+};
+
 export const createServer = (): express.Express => {
   const app = express();
 
@@ -64,6 +99,7 @@ export const createServer = (): express.Express => {
 
   app.post("/create-session", async (req: Request<object, object, CreateSessionBody>, res, next) => {
     try {
+      enforceCreateSessionRateLimit();
       const payload = validateCreateSessionBody(req.body);
       const channelIds = await createDiscordSession(payload);
 
@@ -96,6 +132,19 @@ export const createServer = (): express.Express => {
       res.status(200).json({
         success: true,
         session
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/end-session", async (req: Request<object, object, EndSessionBody>, res, next) => {
+    try {
+      const payload = validateEndSessionBody(req.body);
+      await endSession(payload.matchId, "ended_by_api");
+
+      res.status(200).json({
+        success: true
       });
     } catch (error) {
       next(error);

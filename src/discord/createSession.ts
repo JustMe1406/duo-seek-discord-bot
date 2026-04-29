@@ -134,7 +134,7 @@ export const createDiscordSession = async ({
     });
 
     await (textChannel as GuildTextBasedChannel).send(
-      `🎮 Duo session started!\nYou have ${WAITING_DURATION_MS / 1000} seconds to join voice.\n\nUse this channel to communicate.`
+      `🎮 Duo Session Started!\n⏱ Waiting for both players to join (${WAITING_DURATION_MS / 1000}s).\n\n🔗 Voice: ${buildChannelUrl(guild.id, voiceChannel.id)}\n💬 Chat: ${buildChannelUrl(guild.id, textChannel.id)}\n\nType !extend 30 or !extend 60 after the session starts.`
     );
 
     const session = registerWaitingSession({

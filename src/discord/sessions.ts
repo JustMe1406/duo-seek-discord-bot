@@ -1,9 +1,11 @@
-import { TextChannel } from "discord.js";
-import { client } from "../bot.js";
+import { ChannelType, TextChannel } from "discord.js";
+import { client, getConfiguredCategory, getConfiguredGuild } from "../bot.js";
 import { logger } from "../utils/logger.js";
 
 export const WAITING_DURATION_MS = 60 * 1000;
 export const ACTIVE_DURATION_MS = 5 * 60 * 1000;
+export const LEAVE_GRACE_MS = 30 * 1000;
+export const MAX_SESSION_EXTENSIONS = 2;
 export const ALLOWED_EXTENSION_MINUTES = [30, 60] as const;
 
 export type SessionState = "waiting" | "active";
@@ -34,6 +36,8 @@ export type DuoSession = {
   expires_at: string;
   joined_users: Set<string>;
   timeout: NodeJS.Timeout;
+  extension_count: number;
+  leave_timeout: NodeJS.Timeout | null;
 };
 
 export type SessionApiView = {
@@ -49,6 +53,8 @@ export type SessionApiView = {
   state: SessionState;
   expires_at: string;
   joined_users: string[];
+  extension_count: number;
+  max_extensions: number;
 };
 
 const sessionsByMatchId = new Map<string, DuoSession>();
@@ -67,7 +73,9 @@ export const toSessionApiView = (session: DuoSession): SessionApiView => ({
   text_channel_url: session.text_channel_url,
   state: session.state,
   expires_at: session.expires_at,
-  joined_users: [...session.joined_users]
+  joined_users: [...session.joined_users],
+  extension_count: session.extension_count,
+  max_extensions: MAX_SESSION_EXTENSIONS
 });
 
 export const getSessionByMatchId = (matchId: string): DuoSession | undefined => sessionsByMatchId.get(matchId);
@@ -84,6 +92,15 @@ export const getSessionByTextChannelId = (channelId: string): DuoSession | undef
 
 export const isSessionUser = (session: DuoSession, userId: string): boolean => {
   return session.user1_id === userId || session.user2_id === userId;
+};
+
+const clearLeaveTimer = (session: DuoSession): void => {
+  if (!session.leave_timeout) {
+    return;
+  }
+
+  clearTimeout(session.leave_timeout);
+  session.leave_timeout = null;
 };
 
 const setSessionTimer = (session: DuoSession, durationMs: number): void => {
@@ -118,7 +135,10 @@ const deleteChannelById = async (channelId: string, reason: string): Promise<voi
 };
 
 export const registerWaitingSession = (
-  input: Omit<DuoSession, "state" | "expires_at" | "joined_users" | "timeout">
+  input: Omit<
+    DuoSession,
+    "state" | "expires_at" | "joined_users" | "timeout" | "extension_count" | "leave_timeout"
+  >
 ): DuoSession => {
   if (sessionsByMatchId.has(input.match_id)) {
     throw new SessionError("DUPLICATE_SESSION", "A session already exists for this match_id", 409);
@@ -129,7 +149,9 @@ export const registerWaitingSession = (
     state: "waiting",
     expires_at: new Date(Date.now() + WAITING_DURATION_MS).toISOString(),
     joined_users: new Set<string>(),
-    timeout: setTimeout(() => undefined, WAITING_DURATION_MS)
+    timeout: setTimeout(() => undefined, WAITING_DURATION_MS),
+    extension_count: 0,
+    leave_timeout: null
   };
 
   setSessionTimer(session, WAITING_DURATION_MS);
@@ -155,6 +177,8 @@ export const markUserJoined = async (session: DuoSession, userId: string): Promi
   }
 
   session.joined_users.add(userId);
+  clearLeaveTimer(session);
+
   logger.info("Duo session user joined voice", {
     match_id: session.match_id,
     user_id: userId,
@@ -171,8 +195,14 @@ export const markUserLeft = (session: DuoSession, userId: string): void => {
     return;
   }
 
-  if (session.state === "waiting") {
-    session.joined_users.delete(userId);
+  session.joined_users.delete(userId);
+
+  if (session.state === "active") {
+    clearLeaveTimer(session);
+    session.leave_timeout = setTimeout(() => {
+      void expireSession(session.match_id, "user_left_voice");
+    }, LEAVE_GRACE_MS);
+    session.leave_timeout.unref();
   }
 
   logger.info("Duo session user left voice", {
@@ -191,7 +221,7 @@ export const startActiveSession = async (session: DuoSession): Promise<void> => 
   setSessionTimer(session, ACTIVE_DURATION_MS);
 
   const textChannel = await fetchTextChannel(session);
-  await textChannel?.send("Both players joined! Session started 🎮\nYou now have 5 minutes.");
+  await textChannel?.send("✅ Both players joined!\n⏱ Session started (5 min).");
 
   logger.info("Duo session started", {
     match_id: session.match_id,
@@ -214,15 +244,23 @@ export const extendSession = async (matchId: string, duration: number): Promise<
     throw new SessionError("SESSION_NOT_ACTIVE", "Only active sessions can be extended", 409);
   }
 
+  if (session.extension_count >= MAX_SESSION_EXTENSIONS) {
+    throw new SessionError("EXTENSION_LIMIT_REACHED", "This session has already used its 2 extensions", 409);
+  }
+
   const durationMs = Math.max(new Date(session.expires_at).getTime() - Date.now(), 0) + duration * 60 * 1000;
   setSessionTimer(session, durationMs);
+  session.extension_count += 1;
 
   const textChannel = await fetchTextChannel(session);
-  await textChannel?.send(`Session extended by ${duration} minutes. New expiry: ${session.expires_at}`);
+  await textChannel?.send(
+    `⏱ Session extended by ${duration} minutes (${session.extension_count}/${MAX_SESSION_EXTENSIONS}).\nNew expiry: ${session.expires_at}`
+  );
 
   logger.info("Duo session extended", {
     match_id: session.match_id,
     duration_minutes: duration,
+    extension_count: session.extension_count,
     expires_at: session.expires_at
   });
 
@@ -237,6 +275,7 @@ export const expireSession = async (matchId: string, reason: string): Promise<vo
   }
 
   clearTimeout(session.timeout);
+  clearLeaveTimer(session);
   sessionsByMatchId.delete(matchId);
   matchIdByVoiceChannelId.delete(session.voice_channel_id);
   matchIdByTextChannelId.delete(session.text_channel_id);
@@ -252,4 +291,47 @@ export const expireSession = async (matchId: string, reason: string): Promise<vo
     deleteChannelById(session.voice_channel_id, `Duo Seek session cleanup: ${reason}`),
     deleteChannelById(session.text_channel_id, `Duo Seek session cleanup: ${reason}`)
   ]);
+};
+
+export const endSession = async (matchId: string, reason = "manual_end"): Promise<void> => {
+  const session = sessionsByMatchId.get(matchId);
+
+  if (!session) {
+    throw new SessionError("SESSION_NOT_FOUND", "Session was not found or has already expired", 404);
+  }
+
+  await expireSession(matchId, reason);
+};
+
+export const cleanupStaleDuoChannelsOnBoot = async (): Promise<void> => {
+  const guild = await getConfiguredGuild();
+  const category = await getConfiguredCategory(guild);
+  const channels = await guild.channels.fetch();
+  const staleChannels = channels.filter((channel) => {
+    if (!channel || channel.parentId !== category.id) {
+      return false;
+    }
+
+    if (channel.type !== ChannelType.GuildVoice && channel.type !== ChannelType.GuildText) {
+      return false;
+    }
+
+    return channel.name.startsWith("duo-") || channel.name.includes("duo-");
+  });
+
+  if (staleChannels.size === 0) {
+    logger.info("No stale Duo channels found on boot");
+    return;
+  }
+
+  logger.warn("Deleting stale Duo channels on boot", {
+    count: staleChannels.size,
+    channel_ids: staleChannels.map((channel) => channel?.id)
+  });
+
+  await Promise.all(
+    staleChannels.map((channel) =>
+      channel ? deleteChannelById(channel.id, "Duo Seek stale session cleanup on bot boot") : Promise.resolve()
+    )
+  );
 };

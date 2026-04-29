@@ -13,6 +13,11 @@ Production-ready Discord bot for Duo Seek matchmaking sessions. The Next.js + Su
 - Voice join detection through `voiceStateUpdate`
 - Active session timer: 5 minutes after both users join
 - Session extensions from the website or Discord text channel
+- Max 2 extensions per session
+- Immediate manual cleanup through `POST /end-session`
+- Active session ends if a player leaves voice for more than 30 seconds
+- Startup cleanup deletes stale Duo channels left by bot restarts
+- Basic `/create-session` rate limit to protect Discord channel creation
 - Automatic cleanup with safe channel deletion
 - Duplicate `match_id` protection while a session is active
 - Typed request validation and structured error responses
@@ -69,9 +74,11 @@ PORT=3000
 3. Session starts in `waiting` state and expires after 60 seconds if both users do not join voice.
 4. When both matched users are present in the voice channel, the session becomes `active`.
 5. Active sessions expire after 5 minutes unless extended.
-6. Expiry deletes both Discord channels and removes the session from memory.
+6. Active sessions can be extended up to 2 times.
+7. If a player leaves voice during an active session and does not return within 30 seconds, the session ends.
+8. Expiry or manual ending deletes both Discord channels and removes the session from memory.
 
-Session state is currently in memory. If the bot restarts, active sessions are not restored; the bot logs this warning on startup.
+Session state is currently in memory. If the bot restarts, active sessions are not restored; on boot the bot scans the configured category and deletes stale Duo text/voice channels to avoid abandoned private rooms.
 
 ## API
 
@@ -116,7 +123,9 @@ Success response:
     "text_channel_url": "https://discord.com/channels/guild/456",
     "state": "waiting",
     "expires_at": "2026-04-30T12:01:00.000Z",
-    "joined_users": []
+    "joined_users": [],
+    "extension_count": 0,
+    "max_extensions": 2
   }
 }
 ```
@@ -133,6 +142,7 @@ Request:
 ```
 
 `duration` must be `30` or `60` minutes, and the session must already be `active`.
+Each session can be extended at most 2 times.
 
 Success response:
 
@@ -146,6 +156,26 @@ Success response:
   }
 }
 ```
+
+### `POST /end-session`
+
+Request:
+
+```json
+{
+  "match_id": "ab12cd34-0000-4000-9000-000000000000"
+}
+```
+
+Success response:
+
+```json
+{
+  "success": true
+}
+```
+
+Use this when the website has a leave/end-session action or when the backend needs to clean up a match immediately.
 
 Error response:
 
@@ -169,6 +199,7 @@ Inside the session text channel, either matched player can run:
 ```
 
 The bot rejects commands from users who are not part of that Duo session.
+The bot also rejects extension commands after the session reaches its 2-extension limit.
 
 ## Backend Integration Example
 
