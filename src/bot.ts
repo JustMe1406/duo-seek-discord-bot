@@ -19,6 +19,18 @@ const requiredGuildPermissions = new PermissionsBitField([
 
 export const areMessageCommandsEnabled = (): boolean => process.env.ENABLE_MESSAGE_COMMANDS === "true";
 
+const warnOnInvalidMessageCommandFlag = (): void => {
+  const value = process.env.ENABLE_MESSAGE_COMMANDS;
+
+  if (!value || value === "true" || value === "false") {
+    return;
+  }
+
+  logger.warn("ENABLE_MESSAGE_COMMANDS must be exactly true or false", {
+    received: value
+  });
+};
+
 const intents = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildVoiceStates,
@@ -45,21 +57,27 @@ export const getRequiredEnv = (key: string): string => {
 
 export const startBot = async (): Promise<void> => {
   const token = getRequiredEnv("DISCORD_TOKEN");
+  warnOnInvalidMessageCommandFlag();
 
-  client.once("ready", () => {
-    logger.info("Discord bot ready", {
-      bot_id: client.user?.id,
-      bot_tag: client.user?.tag
+  const readyPromise = new Promise<void>((resolve) => {
+    client.once("ready", () => {
+      logger.info("Discord bot ready", {
+        bot_id: client.user?.id,
+        bot_tag: client.user?.tag
+      });
+
+      logger.warn("Session state is in memory. Active sessions will not survive a bot restart.");
+
+      if (!areMessageCommandsEnabled()) {
+        logger.warn("Discord text commands are disabled. Set ENABLE_MESSAGE_COMMANDS=true after enabling Message Content Intent in the Discord Developer Portal.");
+      }
+
+      resolve();
     });
-
-    logger.warn("Session state is in memory. Active sessions will not survive a bot restart.");
-
-    if (!areMessageCommandsEnabled()) {
-      logger.warn("Discord text commands are disabled. Set ENABLE_MESSAGE_COMMANDS=true after enabling Message Content Intent in the Discord Developer Portal.");
-    }
   });
 
   await client.login(token);
+  await readyPromise;
 };
 
 export const ensureBotReady = (): void => {
